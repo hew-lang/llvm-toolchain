@@ -5,7 +5,7 @@
 # requirements (see hew-lang/hew's setup-llvm action for details), so this
 # builds LLVM from source on a windows-2022 runner using MSVC + Ninja,
 # installs to C:\llvm-22, packages as a .tar.gz, generates a SHA-256
-# checksum, and publishes to a versioned release (llvm-22.1.0-windows-msvc-v1).
+# checksum, and publishes to a versioned release (llvm-22.1.0-windows-msvc-v4).
 # hew's release.yml downloads and verifies that asset instead of building
 # LLVM at release time.
 # The publish step is idempotent — it skips if the versioned asset already
@@ -43,8 +43,8 @@ env:
   # LLVM package. Bump the v-suffix (v2, v3, …) when the packaging or layout
   # changes without a LLVM version bump. Must match hew-lang/hew's
   # setup-llvm action and release.yml exactly.
-  TOOLCHAIN_TAG: "llvm-22.1.0-windows-msvc-v1"
-  ASSET_NAME: "hew-llvm-22.1.0-windows-msvc-v1.tar.gz"
+  TOOLCHAIN_TAG: "toolchain/llvm-22.1.0-windows-msvc-v4"
+  ASSET_NAME: "hew-llvm-22.1.0-windows-msvc-v4.tar.gz"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
@@ -266,6 +266,9 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         shell: pwsh
         run: |
+          # LLVM's integrated rpmalloc exports malloc/free/calloc/realloc.
+          # Hew links LLVM statically through llvm-sys against the UCRT, so
+          # use the platform allocator and keep those CRT exports unique.
           cmake -S D:\llvm-src\llvm -B D:\llvm-build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="C:\llvm-22" `
@@ -283,6 +286,7 @@ jobs:
             -DLLVM_ENABLE_BINDINGS=OFF `
             -DLLVM_ENABLE_ZLIB=OFF `
             -DLLVM_ENABLE_ZSTD=OFF `
+            -DLLVM_INTEGRATED_CRT_ALLOC=OFF `
             -DLLVM_BUILD_LLVM_DYLIB=OFF `
             -DBUILD_SHARED_LIBS=OFF
 
@@ -358,6 +362,56 @@ jobs:
           echo "Packaged: $ASSET_NAME"
           echo "SHA-256:  $hash"
 
+      - name: Validate packaged LLVM archives
+        if: steps.check.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          # rpmalloc.c.obj exports the same CRT allocation symbols as UCRT and
+          # makes the later lld-link invocation fail with duplicate definitions.
+          # Inspect every packaged archive so a CMake-default change cannot
+          # publish a broken toolchain revision.
+          $llvmAr = "C:\llvm-22\bin\llvm-ar.exe"
+          if (-not (Test-Path $llvmAr -PathType Leaf)) {
+            Write-Host "::error::Required LLVM archive inspector missing: $llvmAr"
+            exit 1
+          }
+          $packages = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter "*.tar.gz" -File
+          if ($packages.Count -eq 0) {
+            Write-Host "::error::No packaged .tar.gz archives found to inspect"
+            exit 1
+          }
+          $rpmallocMembers = [System.Collections.Generic.List[string]]::new()
+          foreach ($package in $packages) {
+            $extractDir = Join-Path $env:RUNNER_TEMP "llvm-archive-scan-$([guid]::NewGuid())"
+            New-Item -ItemType Directory -Path $extractDir | Out-Null
+            try {
+              tar -xzf $package.FullName -C $extractDir
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "::error::Could not extract $($package.FullName)"
+                exit 1
+              }
+              foreach ($archive in Get-ChildItem -Path $extractDir -Filter "*.lib" -File -Recurse) {
+                $members = & $llvmAr t $archive.FullName
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "::error::llvm-ar could not inspect $($archive.FullName)"
+                  exit 1
+                }
+                foreach ($member in $members) {
+                  if ($member -match '(?i)(^|[\\/])rpmalloc\.c\.obj$') {
+                    $rpmallocMembers.Add("$($package.Name): $($archive.Name): $member")
+                  }
+                }
+              }
+            } finally {
+              Remove-Item -Recurse -Force $extractDir
+            }
+          }
+          if ($rpmallocMembers.Count -ne 0) {
+            Write-Host "::error::Integrated rpmalloc leaked into the packaged Windows LLVM archives: $($rpmallocMembers -join '; ')"
+            exit 1
+          }
+          Write-Host "OK: no rpmalloc.c.obj"
+
       - name: Ensure toolchain release exists
         if: steps.check.outputs.skip != 'true'
         shell: bash
@@ -368,7 +422,7 @@ jobs:
                --repo "$GITHUB_REPOSITORY" 2>/dev/null; then
             gh release create "$TOOLCHAIN_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "LLVM 22.1.0 Windows MSVC toolchain (v1)" \
+              --title "LLVM 22.1.0 Windows MSVC toolchain (v4)" \
               --notes "Source-built LLVM 22.1.0 for Hew Windows release builds. Layout: llvm-22/. Consumed by hew-lang/hew's CI and release pipeline." \
               --latest=false \
               --prerelease
