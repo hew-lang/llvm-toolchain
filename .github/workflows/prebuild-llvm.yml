@@ -11,15 +11,12 @@
 # The publish step is idempotent — it skips if the versioned asset already
 # exists (immutable once published; bump TOOLCHAIN_TAG to republish).
 #
-# Runs weekly on Sunday 04:00 UTC and can be triggered manually.
-# Can also be triggered automatically when this workflow file changes.
+# Runs when this workflow file changes on main or when triggered manually.
+# LLVM_TAG and TOOLCHAIN_TAG below select the published toolchain revision.
 
 name: Pre-build LLVM
 
 on:
-  schedule:
-    # Sunday 04:00 UTC
-    - cron: "0 4 * * 0"
   workflow_dispatch:
     inputs:
       force_rebuild:
