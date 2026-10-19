@@ -183,7 +183,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
           Set-Location D:\llvm-src
           # LLD's Mach-O support includes libunwind's compact-unwind header.
-          git sparse-checkout set llvm clang lld libunwind cmake third-party
+          # LLVM 23's top-level CMakeLists requires libc's common utilities.
+          git sparse-checkout set llvm clang lld libunwind libc cmake third-party
           if ($LASTEXITCODE -ne 0) { throw "git sparse-checkout failed" }
 
       - name: Configure
